@@ -1,3 +1,5 @@
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, Request, status
 
 from app.auth.dependencies import (
@@ -9,18 +11,11 @@ from app.auth.dependencies import (
     login_rate_limiter,
     password_reset_rate_limiter,
 )
-import secrets
-import string
-from datetime import timedelta
-
 from app.auth.models import User
 from app.auth.repositories import UserProfileRepository
 from app.auth.schemas import (
     ForgotPasswordRequest,
     OverlayTokenResponse,
-    OverlayValidateTokenRequest,
-    OverlayValidateTokenResponse,
-    PairingCodeResponse,
     ResetPasswordRequest,
     RevokeSessionRequest,
     SessionResponse,
@@ -35,13 +30,10 @@ from app.auth.schemas import (
 )
 from app.auth.services import AuthService
 from app.core.database import get_db
-from app.core.redis_client import get_redis
 from app.core.security import create_access_token
 
 router = APIRouter(prefix="/auth", tags=["Authentication"])
 
-_PAIRING_CODE_ALPHABET = string.ascii_uppercase + string.digits
-_PAIRING_CODE_TTL_SECONDS = 10 * 60  # 10 minutes
 _OVERLAY_TOKEN_EXPIRES_DELTA = timedelta(days=90)
 
 
@@ -180,48 +172,32 @@ async def update_current_user_profile(
     return UserProfileResponse.model_validate(profile)
 
 
-# --- Overlay device pairing (bot-overlay) ---
-# Flow: logged-in user requests a short-lived pairing code on the CareerOS
-# website -> types that code into the desktop overlay -> overlay exchanges
-# it (one-time) for a long-lived JWT scoped to "overlay_device", which it
-# then stores locally and uses for all future authenticated requests.
+# --- Overlay device key (bot-overlay) ---
+# Flow: logged-in user clicks "Generate bot key" on the CareerOS website ->
+# backend returns a long-lived JWT scoped to "overlay_device" -> user
+# copies it and pastes it into the bot, which stores it locally and uses
+# it for every request from then on. No pairing code, no expiry timer -
+# it's a straight generate-and-copy key, permanent until regenerated.
 
-@router.post("/overlay/generate-pairing-code", response_model=PairingCodeResponse)
-async def generate_pairing_code(
+@router.post("/overlay/generate-key", response_model=OverlayTokenResponse)
+async def generate_overlay_key(
     current_user: User = Depends(get_current_active_user),
-) -> PairingCodeResponse:
-    code = "".join(secrets.choice(_PAIRING_CODE_ALPHABET) for _ in range(8))
-    redis = get_redis()
-    await redis.set(f"pairing:{code}", str(current_user.id), ex=_PAIRING_CODE_TTL_SECONDS)
-    return PairingCodeResponse(pairing_code=code)
-
-
-@router.post("/overlay/validate-token", response_model=OverlayValidateTokenResponse)
-async def validate_overlay_token(
-    payload: OverlayValidateTokenRequest,
-) -> OverlayValidateTokenResponse:
-    redis = get_redis()
-    key = f"pairing:{payload.token}"
-    user_id = await redis.get(key)
-    if not user_id:
-        return OverlayValidateTokenResponse(valid=False)
-
-    # One-time use: burn the code immediately so it can't be replayed.
-    await redis.delete(key)
-
+) -> OverlayTokenResponse:
     token = create_access_token(
-        user_id, extra_claims={"scope": "overlay_device"}, expires_delta=_OVERLAY_TOKEN_EXPIRES_DELTA
+        current_user.id, extra_claims={"scope": "overlay_device"}, expires_delta=_OVERLAY_TOKEN_EXPIRES_DELTA
     )
-    return OverlayValidateTokenResponse(valid=True, user_id=user_id, token=token)
+    return OverlayTokenResponse(token=token)
 
 
-@router.post("/overlay/regenerate-token", response_model=OverlayTokenResponse)
-async def regenerate_overlay_token(
+@router.post("/overlay/regenerate-key", response_model=OverlayTokenResponse)
+async def regenerate_overlay_key(
     current_user: User = Depends(get_current_active_user),
 ) -> OverlayTokenResponse:
     # Works off the overlay device's own (still-valid) JWT, same as any
     # other authenticated request - get_current_active_user doesn't care
-    # about the "scope" claim, it just needs a valid access token.
+    # about the "scope" claim, it just needs a valid access token. Old key
+    # simply stops being used once the bot switches to the new one; it's
+    # not actively revoked (matches "regenerate anytime" behavior).
     token = create_access_token(
         current_user.id, extra_claims={"scope": "overlay_device"}, expires_delta=_OVERLAY_TOKEN_EXPIRES_DELTA
     )
