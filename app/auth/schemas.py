@@ -121,21 +121,9 @@ class UserProfileUpdateRequest(BaseModel):
     portfolio_url: str | None = None
 
 
-# --- Overlay device pairing (bot-overlay) ---
-
-class PairingCodeResponse(BaseModel):
-    pairing_code: str
-
-
-class OverlayValidateTokenRequest(BaseModel):
-    token: str = Field(min_length=1, max_length=64)
-
-
-class OverlayValidateTokenResponse(BaseModel):
-    valid: bool
-    user_id: str | None = None
-    token: str | None = None
-
+# --- Overlay device key (bot-overlay) ---
+# Simple generate/regenerate permanent key flow - no pairing code, no
+# expiry timer, no Redis dependency.
 
 class OverlayTokenResponse(BaseModel):
     token: str
