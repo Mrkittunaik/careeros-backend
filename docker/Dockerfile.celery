@@ -1,0 +1,30 @@
+FROM python:3.13-slim AS builder
+
+WORKDIR /build
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    build-essential libpq-dev \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --user --no-cache-dir -r requirements.txt
+
+FROM python:3.13-slim AS runtime
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --create-home --uid 1000 appuser
+
+WORKDIR /app
+COPY --from=builder /root/.local /home/appuser/.local
+COPY . .
+RUN chown -R appuser:appuser /app
+
+USER appuser
+ENV PATH=/home/appuser/.local/bin:$PATH \
+    PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1
+
+# Queue is overridden per-service in docker-compose via command args.
+CMD ["celery", "-A", "app.core.celery_app.celery_app", "worker", \
+     "--loglevel=INFO", "--queues=default,ai,resume,job,application"]
